@@ -43,13 +43,18 @@ export function useBudgetStorage() {
       setTransactions(txData ? JSON.parse(txData) : []);
       setAccounts(accData ? JSON.parse(accData) : []);
 
-      // Only load groups if they exist, don't create defaults
+      // Load groups and initialize defaults if needed
       const groups = groupsData ? JSON.parse(groupsData) : [];
       setCategoryGroups(groups);
 
       setTargets(targetsData ? JSON.parse(targetsData) : []);
 
       setLoading(false);
+
+      // Initialize default groups if none exist
+      if (groups.length === 0) {
+        await saveCategoryGroups(DEFAULT_GROUPS);
+      }
     }
     loadData();
   }, []);
@@ -79,6 +84,13 @@ export function useBudgetStorage() {
     await AsyncStorage.setItem(TARGETS_KEY, JSON.stringify(targetsList));
   };
 
+  // Initialize default category groups if none exist
+  const initializeDefaultGroups = async () => {
+    if (categoryGroups.length === 0) {
+      await saveCategoryGroups(DEFAULT_GROUPS);
+    }
+  };
+
   // Refresh all data from storage
   const refreshData = useCallback(async () => {
     setLoading(true);
@@ -92,22 +104,42 @@ export function useBudgetStorage() {
     setTransactions(txData ? JSON.parse(txData) : []);
     setAccounts(accData ? JSON.parse(accData) : []);
 
-    // Only load groups if they exist, don't create defaults
+    // Load groups and initialize defaults if needed
     const groups = groupsData ? JSON.parse(groupsData) : [];
     setCategoryGroups(groups);
 
     setTargets(targetsData ? JSON.parse(targetsData) : []);
 
     setLoading(false);
+
+    // Initialize default groups if none exist
+    if (groups.length === 0) {
+      await saveCategoryGroups(DEFAULT_GROUPS);
+    }
   }, []);
 
   // Create credit card payment category when credit card account is created
   const createCreditCardPaymentCategory = async (
     creditCardAccount: Account
   ) => {
+    // Ensure the Credit Card Payments group exists
+    const creditCardPaymentsGroup = categoryGroups.find(
+      (group) => group.id === "credit-card-payments"
+    );
+
+    if (!creditCardPaymentsGroup) {
+      const newGroup: CategoryGroup = {
+        id: "credit-card-payments",
+        name: "Credit Card Payments",
+        order: categoryGroups.length,
+      };
+      const updatedGroups = [...categoryGroups, newGroup];
+      await saveCategoryGroups(updatedGroups);
+    }
+
     const paymentCategory: Category = {
       id: `cc-payment-${creditCardAccount.id}`,
-      name: `${creditCardAccount.name} Payment`,
+      name: creditCardAccount.name, // Just use the account name, not "Payment"
       budgeted: 0,
       groupId: "credit-card-payments",
     };

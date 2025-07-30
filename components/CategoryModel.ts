@@ -35,5 +35,5 @@ export interface Target {
   targetAmount: number;
   dueDay?: number; // 1-31 for monthly, 1-7 for weekly (1=Monday)
   dueDate?: string; // ISO string for custom
-  nextMonthAmount: number;
+  nextMonthBehavior: "setAside" | "refill";
 }
