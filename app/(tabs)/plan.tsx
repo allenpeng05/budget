@@ -1,10 +1,12 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { useFocusEffect } from "@react-navigation/native";
-import React, { useCallback, useState } from "react";
+import { useFocusEffect, useNavigation } from "@react-navigation/native";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert,
   Button,
+  Keyboard,
   Modal,
+  Platform,
   SafeAreaView,
   ScrollView,
   StyleSheet,
@@ -22,6 +24,7 @@ import { ThemedView } from "../../components/ThemedView";
 import { useBudgetStorage } from "../../hooks/useBudgetStorage";
 import CustomNumberPad from "../components/CustomNumberPad";
 export default function PlanScreen() {
+  const navigation = useNavigation();
   const {
     categories,
     setCategories,
@@ -98,6 +101,480 @@ export default function PlanScreen() {
   const [assignmentPadOperator, setAssignmentPadOperator] = useState<
     "add" | "subtract" | undefined
   >(undefined);
+
+  // ScrollView ref for auto-scroll functionality
+  const assignMoneyScrollViewRef = useRef<ScrollView>(null);
+  const mainPlanScrollViewRef = useRef<ScrollView>(null);
+
+  // Main Plan Editing State
+  const [selectedCategoryForMainEdit, setSelectedCategoryForMainEdit] =
+    useState<Category | null>(null);
+  const [mainEditAmount, setMainEditAmount] = useState("$0.00");
+  const [mainEditPendingAmount, setMainEditPendingAmount] = useState("");
+  const [mainEditAmountFocused, setMainEditAmountFocused] = useState(false);
+  const [mainEditPadMemory, setMainEditPadMemory] = useState<number | null>(
+    null
+  );
+  const [mainEditPadOperator, setMainEditPadOperator] = useState<
+    "add" | "subtract" | undefined
+  >(undefined);
+
+  // Keyboard height state
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+
+  // ScrollView height state
+  const [mainPlanScrollViewHeight, setMainPlanScrollViewHeight] = useState(0);
+  const [assignMoneyScrollViewHeight, setAssignMoneyScrollViewHeight] =
+    useState(0);
+
+  // Category refs for layout measurement
+  const categoryRefs = useRef<{ [key: string]: any }>({});
+
+  // Assigned Too Much Modal State
+  const [assignedTooMuchModalVisible, setAssignedTooMuchModalVisible] =
+    useState(false);
+  const [selectedCategoryForSubtraction, setSelectedCategoryForSubtraction] =
+    useState<Category | null>(null);
+  const [subtractionAmount, setSubtractionAmount] = useState("$0.00");
+  const [subtractionPendingAmount, setSubtractionPendingAmount] = useState("");
+  const [subtractionAmountFocused, setSubtractionAmountFocused] =
+    useState(false);
+  const [subtractionPadMemory, setSubtractionPadMemory] = useState<
+    number | null
+  >(null);
+  const [subtractionPadOperator, setSubtractionPadOperator] = useState<
+    "add" | "subtract" | undefined
+  >(undefined);
+
+  // Helper function to find category index in main plan list
+  const getCategoryIndexInMainPlan = (targetCategory: Category) => {
+    let index = 0;
+    for (const group of categoryGroups.sort((a, b) => a.order - b.order)) {
+      const groupCategories = getCategoriesByGroup(group.id);
+      for (const category of groupCategories) {
+        if (category.id === targetCategory.id) {
+          return index;
+        }
+        index++;
+      }
+    }
+    return -1;
+  };
+
+  // Main Plan Editing Functions
+  const selectCategoryForMainEdit = (category: Category) => {
+    setSelectedCategoryForMainEdit(category);
+    setMainEditAmountFocused(true);
+    // Reset all calculator states for fresh start
+    setMainEditAmount("$0.00");
+    setMainEditPendingAmount("");
+    setMainEditPadMemory(null);
+    setMainEditPadOperator(undefined);
+
+    // Auto-scroll to bring selected category into view above number pad
+    setTimeout(() => {
+      const categoryRef = categoryRefs.current[category.id];
+      if (categoryRef && mainPlanScrollViewRef.current) {
+        categoryRef.measureLayout(
+          mainPlanScrollViewRef.current,
+          (x: number, y: number, width: number, height: number) => {
+            // Get ScrollView-relative dimensions
+            const numberPadHeight = keyboardHeight || 250; // Use actual keyboard height or fallback
+            const categoryBottomY = y + height;
+            const visibleHeight = mainPlanScrollViewHeight - numberPadHeight;
+
+            // Only scroll if the category is blocked by the number pad
+            if (categoryBottomY > visibleHeight) {
+              // Calculate scroll offset to position category above number pad
+              const targetScrollY = y - 100; // 100px buffer above category
+
+              mainPlanScrollViewRef.current?.scrollTo({
+                y: Math.max(0, targetScrollY),
+                animated: true,
+              });
+            }
+          },
+          () => {
+            // Error callback - fallback to no scroll
+            console.log("Failed to measure category layout");
+          }
+        );
+      }
+    }, 100);
+  };
+
+  const handleMainEditPadPress = (digit: string) => {
+    if (mainEditAmountFocused) {
+      setMainEditPendingAmount((prev) => prev + digit);
+    }
+  };
+
+  const handleMainEditPadBackspace = () => {
+    if (mainEditAmountFocused) {
+      if (mainEditPendingAmount) {
+        setMainEditPendingAmount((prev) => prev.slice(0, -1));
+      } else if (
+        selectedCategoryForMainEdit &&
+        selectedCategoryForMainEdit.budgeted > 0
+      ) {
+        // Backspace from existing budgeted amount
+        const currentBudgetedCents = Math.round(
+          selectedCategoryForMainEdit.budgeted * 100
+        );
+        const newBudgetedCents = Math.floor(currentBudgetedCents / 10);
+        const newBudgeted = newBudgetedCents / 100;
+
+        // Update the category directly
+        const updatedCategories = categories.map((cat) =>
+          cat.id === selectedCategoryForMainEdit.id
+            ? { ...cat, budgeted: newBudgeted }
+            : cat
+        );
+        setCategories(updatedCategories);
+      }
+    }
+  };
+
+  const handleMainEditPadAdd = () => {
+    if (mainEditAmountFocused && selectedCategoryForMainEdit) {
+      setMainEditPadOperator("add");
+      setMainEditPadMemory(selectedCategoryForMainEdit.budgeted);
+    }
+  };
+
+  const handleMainEditPadSubtract = () => {
+    if (mainEditAmountFocused && selectedCategoryForMainEdit) {
+      setMainEditPadOperator("subtract");
+      setMainEditPadMemory(selectedCategoryForMainEdit.budgeted);
+    }
+  };
+
+  const handleMainEditPadDone = () => {
+    if (selectedCategoryForMainEdit) {
+      saveMainEdit();
+      setMainEditAmountFocused(false);
+      setSelectedCategoryForMainEdit(null);
+
+      // Force a small delay to ensure the number pad is fully removed before allowing scrolling
+      setTimeout(() => {
+        if (mainPlanScrollViewRef.current) {
+          // Trigger a small scroll to refresh the ScrollView's touch handling
+          mainPlanScrollViewRef.current.scrollTo({
+            y: 0,
+            animated: false,
+          });
+        }
+      }, 50);
+    }
+  };
+
+  const saveMainEdit = () => {
+    if (selectedCategoryForMainEdit) {
+      let finalAmount = 0;
+
+      if (mainEditPadOperator && mainEditPadMemory !== null) {
+        // Handle operations (+ or -)
+        const operationAmount = mainEditPendingAmount
+          ? parseFloat(mainEditPendingAmount) / 100
+          : 0;
+
+        if (mainEditPadOperator === "add") {
+          finalAmount = mainEditPadMemory + operationAmount;
+        } else if (mainEditPadOperator === "subtract") {
+          finalAmount = Math.max(0, mainEditPadMemory - operationAmount);
+        }
+      } else if (mainEditPendingAmount) {
+        // Direct amount entry
+        finalAmount = parseFloat(mainEditPendingAmount) / 100;
+      } else {
+        // No change
+        finalAmount = selectedCategoryForMainEdit.budgeted;
+      }
+
+      // Update the category
+      const updatedCategories = categories.map((cat) =>
+        cat.id === selectedCategoryForMainEdit.id
+          ? { ...cat, budgeted: finalAmount }
+          : cat
+      );
+      setCategories(updatedCategories);
+
+      // Reset states
+      setMainEditAmount("$0.00");
+      setMainEditPendingAmount("");
+      setMainEditPadMemory(null);
+      setMainEditPadOperator(undefined);
+    }
+  };
+
+  const openAssignedTooMuchModal = () => {
+    setAssignedTooMuchModalVisible(true);
+  };
+
+  // Keyboard listeners for accurate height measurement
+  useEffect(() => {
+    const keyboardDidShowListener = Keyboard.addListener(
+      "keyboardDidShow",
+      (e) => {
+        setKeyboardHeight(e.endCoordinates.height);
+      }
+    );
+
+    const keyboardDidHideListener = Keyboard.addListener(
+      "keyboardDidHide",
+      () => {
+        setKeyboardHeight(0);
+      }
+    );
+
+    return () => {
+      keyboardDidShowListener?.remove();
+      keyboardDidHideListener?.remove();
+    };
+  }, []);
+
+  // Control tab bar visibility based on number pad state
+  useEffect(() => {
+    const hideTabBar = () => {
+      // Try multiple approaches to hide the tab bar
+      try {
+        // Approach 1: Direct navigation
+        navigation.setOptions({
+          tabBarStyle: { display: "none" },
+        });
+      } catch (e) {
+        console.log("Direct navigation failed:", e);
+      }
+
+      try {
+        // Approach 2: Parent navigation
+        const parent = navigation.getParent();
+        if (parent && parent.setOptions) {
+          parent.setOptions({
+            tabBarStyle: { display: "none" },
+          });
+        }
+      } catch (e) {
+        console.log("Parent navigation failed:", e);
+      }
+
+      try {
+        // Approach 3: Grandparent navigation
+        const parent = navigation.getParent();
+        if (parent && parent.getParent) {
+          const grandParent = parent.getParent();
+          if (grandParent && grandParent.setOptions) {
+            grandParent.setOptions({
+              tabBarStyle: { display: "none" },
+            });
+          }
+        }
+      } catch (e) {
+        console.log("Grandparent navigation failed:", e);
+      }
+    };
+
+    const showTabBar = () => {
+      // Try multiple approaches to show the tab bar
+      try {
+        // Approach 1: Direct navigation
+        navigation.setOptions({
+          tabBarStyle: Platform.select({
+            ios: { position: "absolute" },
+            default: {},
+          }),
+        });
+      } catch (e) {
+        console.log("Direct navigation failed:", e);
+      }
+
+      try {
+        // Approach 2: Parent navigation
+        const parent = navigation.getParent();
+        if (parent && parent.setOptions) {
+          parent.setOptions({
+            tabBarStyle: Platform.select({
+              ios: { position: "absolute" },
+              default: {},
+            }),
+          });
+        }
+      } catch (e) {
+        console.log("Parent navigation failed:", e);
+      }
+
+      try {
+        // Approach 3: Grandparent navigation
+        const parent = navigation.getParent();
+        if (parent && parent.getParent) {
+          const grandParent = parent.getParent();
+          if (grandParent && grandParent.setOptions) {
+            grandParent.setOptions({
+              tabBarStyle: Platform.select({
+                ios: { position: "absolute" },
+                default: {},
+              }),
+            });
+          }
+        }
+      } catch (e) {
+        console.log("Grandparent navigation failed:", e);
+      }
+    };
+
+    if (mainEditAmountFocused) {
+      // Add a small delay to ensure the state is properly set
+      setTimeout(hideTabBar, 50);
+    } else {
+      setTimeout(showTabBar, 50);
+    }
+
+    // Cleanup function to ensure tab bar is shown when component unmounts
+    return () => {
+      if (!mainEditAmountFocused) {
+        showTabBar();
+      }
+    };
+  }, [mainEditAmountFocused, navigation]);
+
+  // Cleanup when screen loses focus
+  useFocusEffect(
+    useCallback(() => {
+      return () => {
+        // Reset main edit state when leaving screen
+        setSelectedCategoryForMainEdit(null);
+        setMainEditAmountFocused(false);
+        setMainEditPendingAmount("");
+        setMainEditPadMemory(null);
+        setMainEditPadOperator(undefined);
+      };
+    }, [])
+  );
+
+  // Auto-close assigned too much modal when balance is corrected
+  useEffect(() => {
+    if (assignedTooMuchModalVisible && calculateReadyToAssign() >= -0.01) {
+      // Balance is no longer over-assigned, close the modal
+      setAssignedTooMuchModalVisible(false);
+      setSelectedCategoryForSubtraction(null);
+      setSubtractionAmountFocused(false);
+      setSubtractionAmount("$0.00");
+      setSubtractionPendingAmount("");
+      setSubtractionPadMemory(null);
+      setSubtractionPadOperator(undefined);
+    }
+  }, [assignedTooMuchModalVisible, categories]); // Trigger when categories change (which affects balance)
+
+  const selectCategoryForSubtraction = (category: Category) => {
+    setSelectedCategoryForSubtraction(category);
+    setSubtractionAmountFocused(true);
+    // Reset all calculator states for fresh start
+    setSubtractionAmount("$0.00");
+    setSubtractionPendingAmount("");
+    setSubtractionPadMemory(null);
+    setSubtractionPadOperator(undefined);
+  };
+
+  // Subtraction number pad handlers
+  const handleSubtractionPadPress = (digit: string) => {
+    if (subtractionAmountFocused) {
+      setSubtractionPendingAmount((prev) => prev + digit);
+    }
+  };
+
+  const handleSubtractionPadBackspace = () => {
+    if (subtractionAmountFocused) {
+      if (subtractionPendingAmount) {
+        setSubtractionPendingAmount((prev) => prev.slice(0, -1));
+      } else if (
+        selectedCategoryForSubtraction &&
+        selectedCategoryForSubtraction.budgeted > 0
+      ) {
+        // Backspace from existing budgeted amount
+        const currentBudgetedCents = Math.round(
+          selectedCategoryForSubtraction.budgeted * 100
+        );
+        const newBudgetedCents = Math.floor(currentBudgetedCents / 10);
+        const newBudgeted = newBudgetedCents / 100;
+
+        // Update the category directly
+        const updatedCategories = categories.map((cat) =>
+          cat.id === selectedCategoryForSubtraction.id
+            ? { ...cat, budgeted: newBudgeted }
+            : cat
+        );
+        setCategories(updatedCategories);
+      }
+    }
+  };
+
+  const handleSubtractionPadSubtract = () => {
+    if (subtractionAmountFocused && selectedCategoryForSubtraction) {
+      setSubtractionPadOperator("subtract");
+      setSubtractionPadMemory(selectedCategoryForSubtraction.budgeted);
+    }
+  };
+
+  const handleSubtractionPadDone = () => {
+    if (selectedCategoryForSubtraction) {
+      saveSubtraction();
+      setSubtractionAmountFocused(false);
+      setSelectedCategoryForSubtraction(null);
+    }
+  };
+
+  const saveSubtraction = () => {
+    if (selectedCategoryForSubtraction) {
+      let finalAmount = selectedCategoryForSubtraction.budgeted;
+
+      if (subtractionPadOperator && subtractionPadMemory !== null) {
+        // Handle subtraction operation
+        const operationAmount = subtractionPendingAmount
+          ? parseFloat(subtractionPendingAmount) / 100
+          : 0;
+
+        if (subtractionPadOperator === "subtract") {
+          finalAmount = Math.max(0, subtractionPadMemory - operationAmount);
+        }
+      } else if (subtractionPendingAmount) {
+        // Direct amount entry (subtract this amount from current)
+        const enteredAmount = parseFloat(subtractionPendingAmount) / 100;
+        finalAmount = Math.max(
+          0,
+          selectedCategoryForSubtraction.budgeted - enteredAmount
+        );
+      }
+
+      // Update the category
+      const updatedCategories = categories.map((cat) =>
+        cat.id === selectedCategoryForSubtraction.id
+          ? { ...cat, budgeted: finalAmount }
+          : cat
+      );
+      setCategories(updatedCategories);
+
+      // Reset states
+      setSubtractionAmount("$0.00");
+      setSubtractionPendingAmount("");
+      setSubtractionPadMemory(null);
+      setSubtractionPadOperator(undefined);
+    }
+  };
+
+  // Helper function to find category index in assign money list
+  const getCategoryIndexInAssignMoneyList = (targetCategory: Category) => {
+    let index = 0;
+    for (const group of categoryGroups.sort((a, b) => a.order - b.order)) {
+      const groupCategories = getCategoriesByGroup(group.id);
+      for (const category of groupCategories) {
+        if (category.id === targetCategory.id) {
+          return index;
+        }
+        index++;
+      }
+    }
+    return -1;
+  };
 
   // Refresh data when screen comes into focus
   useFocusEffect(
@@ -236,15 +713,35 @@ export default function PlanScreen() {
     setSelectedCategoryForTarget(category);
     setTargetModalVisible(true);
 
-    // Reset all target-related state for a clean start
-    setTargetAmount("$0.00");
+    // Check if category already has a target for editing
+    const existingTarget = getTargetForCategory(category.id);
+
+    if (existingTarget) {
+      // Pre-populate with existing target data for editing
+      setTargetAmount(`$${existingTarget.targetAmount.toFixed(2)}`);
+      setTargetFrequency(existingTarget.frequency);
+      setTargetNextMonthBehavior(existingTarget.nextMonthBehavior);
+
+      if (existingTarget.frequency === "monthly") {
+        setTargetDueDay(existingTarget.dueDay?.toString() || "1");
+      } else if (existingTarget.frequency === "weekly") {
+        setTargetDueDay(existingTarget.dueDay?.toString() || "1");
+      } else if (existingTarget.frequency === "custom") {
+        setTargetDueDay(existingTarget.dueDate || "");
+      }
+    } else {
+      // Reset all target-related state for a new target
+      setTargetAmount("$0.00");
+      setTargetFrequency("monthly");
+      setTargetNextMonthBehavior("setAside");
+      setTargetDueDay("1");
+    }
+
+    // Always reset these states
     setTargetPendingAmount("");
     setTargetPadMemory(null);
     setTargetPadOperator(undefined);
     setTargetAmountFocused(false);
-    setTargetNextMonthBehavior("setAside");
-    setTargetFrequency("monthly");
-    setTargetDueDay("1");
     setTargetDueDayDropdownVisible(false);
   };
 
@@ -384,8 +881,46 @@ export default function PlanScreen() {
       handleAssignmentPadEquals();
     }
 
-    // Call saveAssignment to actually save the changes
-    saveAssignment();
+    // Save the assignment but don't close the modal
+    if (selectedCategoryForAssignment) {
+      let finalAmount = 0;
+
+      if (assignmentPadOperator && assignmentPadMemory !== null) {
+        // Handle operations (+ or -)
+        const operationAmount = assignmentPendingAmount
+          ? parseFloat(assignmentPendingAmount) / 100
+          : 0;
+
+        if (assignmentPadOperator === "add") {
+          finalAmount = assignmentPadMemory + operationAmount;
+        } else if (assignmentPadOperator === "subtract") {
+          finalAmount = Math.max(0, assignmentPadMemory - operationAmount);
+        }
+      } else if (assignmentPendingAmount) {
+        // Direct amount entry
+        finalAmount = parseFloat(assignmentPendingAmount) / 100;
+      } else if (assignmentAmount !== "$0.00") {
+        // Use assignment amount
+        finalAmount = parseFloat(assignmentAmount.replace("$", ""));
+      }
+
+      if (finalAmount >= 0) {
+        const updatedCategories = categories.map((cat) =>
+          cat.id === selectedCategoryForAssignment.id
+            ? { ...cat, budgeted: finalAmount }
+            : cat
+        );
+        setCategories(updatedCategories);
+      }
+    }
+
+    // Reset states but keep modal open
+    setSelectedCategoryForAssignment(null);
+    setAssignmentAmount("$0.00");
+    setAssignmentPendingAmount("");
+    setAssignmentAmountFocused(false);
+    setAssignmentPadMemory(null);
+    setAssignmentPadOperator(undefined);
   };
 
   const getDayOfWeekName = (day: number) => {
@@ -419,6 +954,37 @@ export default function PlanScreen() {
     setAssignmentPendingAmount("");
     setAssignmentPadMemory(null);
     setAssignmentPadOperator(undefined);
+
+    // Auto-scroll to bring selected category into view above number pad
+    setTimeout(() => {
+      const categoryRef = categoryRefs.current[category.id];
+      if (categoryRef && assignMoneyScrollViewRef.current) {
+        categoryRef.measureLayout(
+          assignMoneyScrollViewRef.current,
+          (x: number, y: number, width: number, height: number) => {
+            // Get ScrollView-relative dimensions
+            const numberPadHeight = keyboardHeight || 250; // Use actual keyboard height or fallback
+            const categoryBottomY = y + height;
+            const visibleHeight = assignMoneyScrollViewHeight - numberPadHeight;
+
+            // Only scroll if the category is blocked by the number pad
+            if (categoryBottomY > visibleHeight) {
+              // Calculate scroll offset to position category above number pad
+              const targetScrollY = y - 100; // 100px buffer above category
+
+              assignMoneyScrollViewRef.current?.scrollTo({
+                y: Math.max(0, targetScrollY),
+                animated: true,
+              });
+            }
+          },
+          () => {
+            // Error callback - fallback to no scroll
+            console.log("Failed to measure category layout");
+          }
+        );
+      }
+    }, 100);
   };
 
   const saveAssignment = () => {
@@ -536,6 +1102,38 @@ export default function PlanScreen() {
       return `$${remainingNeeded.toFixed(2)} more needed by ${getDayOfWeekName(
         target.dueDay || 1
       )}`;
+    } else if (target.frequency === "custom" && target.dueDate) {
+      // Custom target with date-aware monthly calculation
+      const today = new Date();
+      const dueDate = new Date(target.dueDate);
+
+      // Check if date parsing was successful
+      if (isNaN(dueDate.getTime())) {
+        return `$${remainingNeeded.toFixed(2)} more needed by ${
+          target.dueDate
+        }`;
+      }
+
+      // Calculate months remaining (including current month)
+      const currentMonth = today.getMonth();
+      const currentYear = today.getFullYear();
+      const dueMonth = dueDate.getMonth();
+      const dueYear = dueDate.getFullYear();
+
+      const monthsRemaining =
+        (dueYear - currentYear) * 12 + (dueMonth - currentMonth) + 1;
+
+      if (monthsRemaining <= 0) {
+        // Target is overdue
+        return `$${remainingNeeded.toFixed(2)} overdue by ${target.dueDate}`;
+      } else if (monthsRemaining === 1) {
+        // Last month - need full remaining amount
+        return `$${remainingNeeded.toFixed(2)} more needed this month`;
+      } else {
+        // Calculate monthly amount needed
+        const monthlyAmount = remainingNeeded / monthsRemaining;
+        return `$${monthlyAmount.toFixed(2)} more needed this month`;
+      }
     } else {
       return `$${remainingNeeded.toFixed(2)} more needed by ${target.dueDate}`;
     }
@@ -733,104 +1331,263 @@ export default function PlanScreen() {
         {loading ? (
           <ThemedText>Loading...</ThemedText>
         ) : (
-          <ScrollView style={styles.scrollView}>
-            {/* Ready to Assign Section */}
-            {calculateReadyToAssign() > 0 && (
-              <TouchableOpacity
-                style={styles.readyToAssignSection}
-                onPress={openAssignMoneyModal}
-              >
-                <View style={styles.readyToAssignContent}>
-                  <ThemedText style={styles.readyToAssignAmount}>
-                    ${calculateReadyToAssign().toFixed(2)}
-                  </ThemedText>
-                  <ThemedText style={styles.readyToAssignText}>
-                    Ready to Assign ›
-                  </ThemedText>
-                </View>
-              </TouchableOpacity>
-            )}
+          <TouchableOpacity
+            style={{ flex: 1 }}
+            activeOpacity={1}
+            onPress={() => {
+              if (mainEditAmountFocused) {
+                setSelectedCategoryForMainEdit(null);
+                setMainEditAmountFocused(false);
+                setMainEditPendingAmount("");
+                setMainEditPadMemory(null);
+                setMainEditPadOperator(undefined);
 
-            {/* Category Groups */}
-            {categoryGroups
-              .sort((a, b) => a.order - b.order)
-              .map((group: CategoryGroup) => {
-                const groupCategories = getCategoriesByGroup(group.id);
-                const totalBudgeted = groupCategories.reduce(
-                  (sum, cat) => sum + cat.budgeted,
-                  0
-                );
-                const isCollapsed = collapsedGroups.has(group.id);
-
-                return (
-                  <View key={group.id} style={styles.groupSection}>
-                    <TouchableOpacity
-                      style={styles.groupHeader}
-                      onPress={() => toggleGroupCollapse(group.id)}
-                    >
-                      <View style={styles.groupHeaderLeft}>
-                        <ThemedText style={styles.groupArrow}>
-                          {isCollapsed ? "▶" : "▼"}
-                        </ThemedText>
-                        <ThemedText style={styles.groupName}>
-                          {group.name}
-                        </ThemedText>
-                      </View>
-                      <ThemedText style={styles.groupAvailable}>
-                        {group.id === "credit-card-payments"
-                          ? "Available for Payment"
-                          : "Available to Spend"}
-                      </ThemedText>
-                    </TouchableOpacity>
-                    {!isCollapsed && (
-                      <>
-                        {groupCategories.length === 0 ? (
-                          <ThemedText style={styles.emptyText}>
-                            No categories yet
-                          </ThemedText>
-                        ) : (
-                          groupCategories.map((category) => {
-                            const target = getTargetForCategory(category.id);
-                            const spending = calculateCategorySpending(
-                              category.id
-                            );
-                            const available = category.budgeted - spending;
-
-                            return (
-                              <View
-                                key={category.id}
-                                style={styles.categoryItem}
-                              >
-                                <View style={styles.categoryInfo}>
-                                  <View style={styles.categoryLeft}>
-                                    <ThemedText style={styles.categoryName}>
-                                      {category.name}
-                                    </ThemedText>
-                                    {target && (
-                                      <ThemedText style={styles.categoryTarget}>
-                                        {getTargetDisplayText(
-                                          target,
-                                          category.budgeted
-                                        )}
-                                      </ThemedText>
-                                    )}
-                                  </View>
-                                  <View style={styles.categoryAmountContainer}>
-                                    <ThemedText style={styles.categoryAmount}>
-                                      ${available.toFixed(2)}
-                                    </ThemedText>
-                                  </View>
-                                </View>
-                              </View>
-                            );
-                          })
-                        )}
-                      </>
-                    )}
+                // Force a small delay to ensure the number pad is fully removed before allowing scrolling
+                setTimeout(() => {
+                  if (mainPlanScrollViewRef.current) {
+                    // Trigger a small scroll to refresh the ScrollView's touch handling
+                    mainPlanScrollViewRef.current.scrollTo({
+                      y: 0,
+                      animated: false,
+                    });
+                  }
+                }, 50);
+              }
+            }}
+          >
+            <ScrollView
+              ref={mainPlanScrollViewRef}
+              style={styles.scrollView}
+              contentContainerStyle={styles.scrollViewContent}
+              onLayout={(event) => {
+                setMainPlanScrollViewHeight(event.nativeEvent.layout.height);
+              }}
+            >
+              {/* Ready to Assign Section */}
+              {calculateReadyToAssign() > 0 && (
+                <TouchableOpacity
+                  style={styles.readyToAssignSection}
+                  onPress={openAssignMoneyModal}
+                >
+                  <View style={styles.readyToAssignContent}>
+                    <ThemedText style={styles.readyToAssignAmount}>
+                      ${calculateReadyToAssign().toFixed(2)}
+                    </ThemedText>
+                    <ThemedText style={styles.readyToAssignText}>
+                      Ready to Assign ›
+                    </ThemedText>
                   </View>
-                );
-              })}
-          </ScrollView>
+                </TouchableOpacity>
+              )}
+
+              {/* Assigned Too Much Section */}
+              {calculateReadyToAssign() < -0.01 && (
+                <TouchableOpacity
+                  style={styles.assignedTooMuchSection}
+                  onPress={openAssignedTooMuchModal}
+                >
+                  <View style={styles.assignedTooMuchContent}>
+                    <ThemedText style={styles.assignedTooMuchAmount}>
+                      ${calculateReadyToAssign().toFixed(2)}
+                    </ThemedText>
+                    <ThemedText style={styles.assignedTooMuchText}>
+                      Assigned Too Much ›
+                    </ThemedText>
+                    <ThemedText style={styles.assignedTooMuchSubtext}>
+                      Subtract funds until you reach zero
+                    </ThemedText>
+                  </View>
+                </TouchableOpacity>
+              )}
+
+              {/* Category Groups */}
+              {categoryGroups
+                .sort((a, b) => a.order - b.order)
+                .map((group: CategoryGroup) => {
+                  const groupCategories = getCategoriesByGroup(group.id);
+                  const totalBudgeted = groupCategories.reduce(
+                    (sum, cat) => sum + cat.budgeted,
+                    0
+                  );
+                  const isCollapsed = collapsedGroups.has(group.id);
+
+                  return (
+                    <View key={group.id} style={styles.groupSection}>
+                      <TouchableOpacity
+                        style={styles.groupHeader}
+                        onPress={() => toggleGroupCollapse(group.id)}
+                      >
+                        <View style={styles.groupHeaderLeft}>
+                          <ThemedText style={styles.groupArrow}>
+                            {isCollapsed ? "▶" : "▼"}
+                          </ThemedText>
+                          <ThemedText style={styles.groupName}>
+                            {group.name}
+                          </ThemedText>
+                        </View>
+                        <View style={styles.groupHeaderRight}>
+                          <View style={styles.groupTotalsContainer}>
+                            <View style={styles.groupTotalColumn}>
+                              <ThemedText style={styles.groupTotalLabel}>
+                                Assigned
+                              </ThemedText>
+                              <ThemedText style={styles.groupTotalAmount}>
+                                ${totalBudgeted.toFixed(2)}
+                              </ThemedText>
+                            </View>
+                            <View style={styles.groupTotalColumn}>
+                              <ThemedText style={styles.groupTotalLabel}>
+                                {group.id === "credit-card-payments"
+                                  ? "Available for Payment"
+                                  : "Available to Spend"}
+                              </ThemedText>
+                              <ThemedText style={styles.groupTotalAmount}>
+                                $
+                                {(
+                                  totalBudgeted -
+                                  groupCategories.reduce(
+                                    (sum, cat) =>
+                                      sum + calculateCategorySpending(cat.id),
+                                    0
+                                  )
+                                ).toFixed(2)}
+                              </ThemedText>
+                            </View>
+                          </View>
+                        </View>
+                      </TouchableOpacity>
+                      {!isCollapsed && (
+                        <>
+                          {groupCategories.length === 0 ? (
+                            <ThemedText style={styles.emptyText}>
+                              No categories yet
+                            </ThemedText>
+                          ) : (
+                            groupCategories.map((category) => {
+                              const target = getTargetForCategory(category.id);
+                              const spending = calculateCategorySpending(
+                                category.id
+                              );
+                              const available = category.budgeted - spending;
+
+                              return (
+                                <TouchableOpacity
+                                  key={category.id}
+                                  ref={(ref) => {
+                                    categoryRefs.current[category.id] = ref;
+                                  }}
+                                  style={[
+                                    styles.categoryItem,
+                                    selectedCategoryForMainEdit?.id ===
+                                      category.id &&
+                                      styles.categoryItemSelected,
+                                  ]}
+                                  onPress={() =>
+                                    selectCategoryForMainEdit(category)
+                                  }
+                                >
+                                  <View style={styles.categoryInfo}>
+                                    <View style={styles.categoryLeft}>
+                                      <ThemedText style={styles.categoryName}>
+                                        {category.name}
+                                      </ThemedText>
+                                      {target &&
+                                        group.id !== "credit-card-payments" && (
+                                          <ThemedText
+                                            style={styles.categoryTarget}
+                                          >
+                                            {getTargetDisplayText(
+                                              target,
+                                              category.budgeted
+                                            )}
+                                          </ThemedText>
+                                        )}
+                                    </View>
+                                    <View
+                                      style={styles.categoryAmountContainer}
+                                    >
+                                      {selectedCategoryForMainEdit?.id ===
+                                      category.id ? (
+                                        <View
+                                          style={styles.categoryAmountStack}
+                                        >
+                                          <ThemedText
+                                            style={styles.categoryAssigned}
+                                          >
+                                            ${category.budgeted.toFixed(2)}
+                                          </ThemedText>
+                                          <ThemedText
+                                            style={[
+                                              styles.categoryAmount,
+                                              styles.categoryAmountSelected,
+                                            ]}
+                                          >
+                                            {mainEditPadOperator
+                                              ? `$${category.budgeted.toFixed(
+                                                  2
+                                                )}`
+                                              : mainEditPendingAmount
+                                              ? `$${(
+                                                  parseFloat(
+                                                    mainEditPendingAmount
+                                                  ) / 100
+                                                ).toFixed(2)}`
+                                              : `$${available.toFixed(2)}`}
+                                          </ThemedText>
+                                          {mainEditPadOperator && (
+                                            <ThemedText
+                                              style={
+                                                styles.categoryOperationText
+                                              }
+                                            >
+                                              {mainEditPadOperator === "add"
+                                                ? "+"
+                                                : "-"}{" "}
+                                              $
+                                              {mainEditPendingAmount
+                                                ? (
+                                                    parseFloat(
+                                                      mainEditPendingAmount
+                                                    ) / 100
+                                                  ).toFixed(2)
+                                                : "0.00"}
+                                            </ThemedText>
+                                          )}
+                                        </View>
+                                      ) : (
+                                        <ThemedText
+                                          style={styles.categoryAmount}
+                                        >
+                                          ${available.toFixed(2)}
+                                        </ThemedText>
+                                      )}
+                                    </View>
+                                  </View>
+                                </TouchableOpacity>
+                              );
+                            })
+                          )}
+                        </>
+                      )}
+                    </View>
+                  );
+                })}
+            </ScrollView>
+          </TouchableOpacity>
+        )}
+
+        {/* Main Plan Number Pad */}
+        {mainEditAmountFocused && selectedCategoryForMainEdit && (
+          <View style={styles.mainEditNumberPadContainer}>
+            <CustomNumberPad
+              onPress={handleMainEditPadPress}
+              onBackspace={handleMainEditPadBackspace}
+              onAdd={handleMainEditPadAdd}
+              onSubtract={handleMainEditPadSubtract}
+              onEquals={() => {}} // Not used
+              onDone={handleMainEditPadDone}
+            />
+          </View>
         )}
 
         {/* Assign Money Modal */}
@@ -866,7 +1623,16 @@ export default function PlanScreen() {
               </View>
 
               {/* Categories List */}
-              <ScrollView style={styles.assignMoneyScrollView}>
+              <ScrollView
+                ref={assignMoneyScrollViewRef}
+                style={styles.assignMoneyScrollView}
+                contentContainerStyle={styles.assignMoneyScrollViewContent}
+                onLayout={(event) => {
+                  setAssignMoneyScrollViewHeight(
+                    event.nativeEvent.layout.height
+                  );
+                }}
+              >
                 {categoryGroups
                   .sort((a, b) => a.order - b.order)
                   .map((group: CategoryGroup) => {
@@ -907,6 +1673,9 @@ export default function PlanScreen() {
                           return (
                             <TouchableOpacity
                               key={category.id}
+                              ref={(ref) => {
+                                categoryRefs.current[category.id] = ref;
+                              }}
                               style={styles.assignMoneyCategoryItem}
                               onPress={() =>
                                 selectCategoryForAssignment(category)
@@ -919,16 +1688,17 @@ export default function PlanScreen() {
                                   >
                                     {category.name}
                                   </ThemedText>
-                                  {target && (
-                                    <ThemedText
-                                      style={styles.assignMoneyCategoryTarget}
-                                    >
-                                      {getTargetDisplayText(
-                                        target,
-                                        category.budgeted
-                                      )}
-                                    </ThemedText>
-                                  )}
+                                  {target &&
+                                    group.id !== "credit-card-payments" && (
+                                      <ThemedText
+                                        style={styles.assignMoneyCategoryTarget}
+                                      >
+                                        {getTargetDisplayText(
+                                          target,
+                                          category.budgeted
+                                        )}
+                                      </ThemedText>
+                                    )}
                                 </View>
                                 <View
                                   style={
@@ -1061,6 +1831,167 @@ export default function PlanScreen() {
           </View>
         </Modal>
 
+        {/* Assigned Too Much Modal */}
+        <Modal
+          visible={assignedTooMuchModalVisible}
+          animationType="slide"
+          transparent={false}
+        >
+          <SafeAreaView style={{ flex: 1, backgroundColor: "#18191A" }}>
+            <View style={styles.assignedTooMuchContainer}>
+              <View style={styles.assignedTooMuchHeader}>
+                <TouchableOpacity
+                  onPress={() => setAssignedTooMuchModalVisible(false)}
+                  style={styles.assignedTooMuchCancelButton}
+                >
+                  <ThemedText style={styles.assignedTooMuchCancelButtonText}>
+                    Cancel
+                  </ThemedText>
+                </TouchableOpacity>
+                <ThemedText style={styles.assignedTooMuchTitle}>
+                  Subtract Money
+                </ThemedText>
+              </View>
+
+              {/* Over-assigned Warning Section */}
+              <View style={styles.assignedTooMuchWarningSection}>
+                <ThemedText style={styles.assignedTooMuchWarningAmount}>
+                  ${Math.abs(calculateReadyToAssign()).toFixed(2)}
+                </ThemedText>
+                <ThemedText style={styles.assignedTooMuchWarningText}>
+                  Assigning more than you have
+                </ThemedText>
+                <ThemedText style={styles.assignedTooMuchWarningSubtext}>
+                  Subtract funds until you reach zero
+                </ThemedText>
+              </View>
+
+              {/* Categories List for Subtraction */}
+              <ScrollView
+                style={styles.assignedTooMuchScrollView}
+                contentContainerStyle={styles.assignedTooMuchScrollViewContent}
+              >
+                {categoryGroups
+                  .sort((a, b) => a.order - b.order)
+                  .map((group: CategoryGroup) => {
+                    const groupCategories = getCategoriesByGroup(group.id);
+                    const totalAssigned = groupCategories.reduce(
+                      (sum, cat) => sum + cat.budgeted,
+                      0
+                    );
+
+                    if (totalAssigned === 0) return null; // Only show groups with assigned money
+
+                    return (
+                      <View
+                        key={group.id}
+                        style={styles.assignedTooMuchGroupSection}
+                      >
+                        <View style={styles.assignedTooMuchGroupHeader}>
+                          <ThemedText style={styles.assignedTooMuchGroupName}>
+                            {group.name}
+                          </ThemedText>
+                          <ThemedText style={styles.assignedTooMuchGroupTotal}>
+                            Assigned ${totalAssigned.toFixed(2)}
+                          </ThemedText>
+                        </View>
+
+                        {groupCategories.map((category) => {
+                          if (category.budgeted === 0) return null; // Only show categories with assigned money
+
+                          return (
+                            <TouchableOpacity
+                              key={category.id}
+                              style={[
+                                styles.assignedTooMuchCategoryItem,
+                                selectedCategoryForSubtraction?.id ===
+                                  category.id &&
+                                  styles.assignedTooMuchCategoryItemSelected,
+                              ]}
+                              onPress={() =>
+                                selectCategoryForSubtraction(category)
+                              }
+                            >
+                              <View style={styles.assignedTooMuchCategoryInfo}>
+                                <View
+                                  style={styles.assignedTooMuchCategoryLeft}
+                                >
+                                  <ThemedText
+                                    style={styles.assignedTooMuchCategoryName}
+                                  >
+                                    {category.name}
+                                  </ThemedText>
+                                </View>
+                                <View
+                                  style={
+                                    styles.assignedTooMuchCategoryAmountContainer
+                                  }
+                                >
+                                  <ThemedText
+                                    style={[
+                                      styles.assignedTooMuchCategoryAmount,
+                                      selectedCategoryForSubtraction?.id ===
+                                        category.id &&
+                                        styles.assignedTooMuchCategoryAmountSelected,
+                                    ]}
+                                  >
+                                    {selectedCategoryForSubtraction?.id ===
+                                      category.id && subtractionPadOperator
+                                      ? `$${category.budgeted.toFixed(2)}`
+                                      : selectedCategoryForSubtraction?.id ===
+                                          category.id &&
+                                        subtractionPendingAmount
+                                      ? `$${(
+                                          parseFloat(subtractionPendingAmount) /
+                                          100
+                                        ).toFixed(2)}`
+                                      : `$${category.budgeted.toFixed(2)}`}
+                                  </ThemedText>
+                                  {selectedCategoryForSubtraction?.id ===
+                                    category.id &&
+                                    subtractionPadOperator && (
+                                      <ThemedText
+                                        style={
+                                          styles.assignedTooMuchCategoryOperationText
+                                        }
+                                      >
+                                        - $
+                                        {subtractionPendingAmount
+                                          ? (
+                                              parseFloat(
+                                                subtractionPendingAmount
+                                              ) / 100
+                                            ).toFixed(2)
+                                          : "0.00"}
+                                      </ThemedText>
+                                    )}
+                                </View>
+                              </View>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+                    );
+                  })}
+              </ScrollView>
+
+              {/* Number Pad for Subtraction */}
+              {subtractionAmountFocused && selectedCategoryForSubtraction && (
+                <View style={styles.subtractionNumberPadContainer}>
+                  <CustomNumberPad
+                    onPress={handleSubtractionPadPress}
+                    onBackspace={handleSubtractionPadBackspace}
+                    onAdd={() => {}} // Not used for subtraction
+                    onSubtract={handleSubtractionPadSubtract}
+                    onEquals={() => {}} // Not used
+                    onDone={handleSubtractionPadDone}
+                  />
+                </View>
+              )}
+            </View>
+          </SafeAreaView>
+        </Modal>
+
         {/* Edit Plan Modal */}
         <Modal
           visible={editPlanModalVisible}
@@ -1081,7 +2012,10 @@ export default function PlanScreen() {
                 </ThemedText>
               </View>
 
-              <ScrollView style={styles.editPlanScrollView}>
+              <ScrollView
+                style={styles.editPlanScrollView}
+                contentContainerStyle={styles.editPlanScrollViewContent}
+              >
                 <View style={styles.editPlanContent}>
                   <View style={styles.editPlanButtons}>
                     <TouchableOpacity
@@ -1155,27 +2089,37 @@ export default function PlanScreen() {
                                 <ThemedText style={styles.editPlanCategoryName}>
                                   {category.name}
                                 </ThemedText>
-                                {target && (
-                                  <ThemedText
-                                    style={styles.editPlanCategoryTarget}
-                                  >
-                                    {getTargetDisplayText(
-                                      target,
-                                      category.budgeted
-                                    )}
-                                  </ThemedText>
-                                )}
+                                {target &&
+                                  group.id !== "credit-card-payments" && (
+                                    <ThemedText
+                                      style={styles.editPlanCategoryTarget}
+                                    >
+                                      {getTargetDisplayText(
+                                        target,
+                                        category.budgeted
+                                      )}
+                                    </ThemedText>
+                                  )}
                               </View>
                               <View style={styles.editPlanCategoryActions}>
-                                {getTargetForCategory(category.id) ? (
-                                  <View style={styles.targetAmountDisplay}>
+                                {group.id === "credit-card-payments" ? (
+                                  <View style={styles.creditCardIndicator}>
+                                    <ThemedText style={styles.creditCardText}>
+                                      Payment Category
+                                    </ThemedText>
+                                  </View>
+                                ) : getTargetForCategory(category.id) ? (
+                                  <TouchableOpacity
+                                    style={styles.targetAmountDisplay}
+                                    onPress={() => openTargetModal(category)}
+                                  >
                                     <ThemedText style={styles.targetAmountText}>
                                       $
                                       {getTargetForCategory(
                                         category.id
                                       )?.targetAmount.toFixed(2)}
                                     </ThemedText>
-                                  </View>
+                                  </TouchableOpacity>
                                 ) : (
                                   <TouchableOpacity
                                     style={styles.addTargetButton}
@@ -1387,7 +2331,10 @@ export default function PlanScreen() {
                         </ThemedText>
                       </TouchableOpacity>
                       <ThemedText style={styles.targetModalTitle}>
-                        {selectedCategoryForTarget?.name}
+                        {selectedCategoryForTarget &&
+                        getTargetForCategory(selectedCategoryForTarget.id)
+                          ? `Edit Target - ${selectedCategoryForTarget.name}`
+                          : `Add Target - ${selectedCategoryForTarget?.name}`}
                       </ThemedText>
                     </View>
 
@@ -1794,6 +2741,9 @@ const styles = StyleSheet.create({
   scrollView: {
     flex: 1,
   },
+  scrollViewContent: {
+    paddingBottom: 300, // Extra padding to ensure bottom categories can scroll above number pad
+  },
   readyToAssignSection: {
     backgroundColor: "#4CAF50",
     marginHorizontal: 20,
@@ -1961,6 +2911,9 @@ const styles = StyleSheet.create({
   },
   editPlanScrollView: {
     flex: 1,
+  },
+  editPlanScrollViewContent: {
+    paddingBottom: 50,
   },
   editPlanContent: {
     padding: 20,
@@ -2490,6 +3443,9 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingHorizontal: 20,
   },
+  assignMoneyScrollViewContent: {
+    paddingBottom: 500, // Excessive padding to test auto-scroll
+  },
   assignMoneyGroupSection: {
     marginBottom: 20,
   },
@@ -2605,5 +3561,223 @@ const styles = StyleSheet.create({
     color: "#007AFF",
     fontWeight: "600",
     marginTop: 2,
+  },
+  creditCardIndicator: {
+    backgroundColor: "#666",
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
+  creditCardText: {
+    fontSize: 12,
+    color: "#ccc",
+    fontWeight: "500",
+  },
+  // Assigned Too Much Styles
+  assignedTooMuchSection: {
+    backgroundColor: "#D32F2F",
+    marginHorizontal: 20,
+    marginVertical: 10,
+    borderRadius: 8,
+    padding: 20,
+  },
+  assignedTooMuchContent: {
+    alignItems: "center",
+  },
+  assignedTooMuchAmount: {
+    fontSize: 24,
+    fontWeight: "bold",
+    color: "#fff",
+    marginBottom: 5,
+  },
+  assignedTooMuchText: {
+    fontSize: 16,
+    color: "#fff",
+    fontWeight: "600",
+    marginBottom: 5,
+  },
+  assignedTooMuchSubtext: {
+    fontSize: 14,
+    color: "#fff",
+    opacity: 0.9,
+  },
+  assignedTooMuchContainer: {
+    flex: 1,
+    backgroundColor: "#18191A",
+  },
+  assignedTooMuchHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingHorizontal: 20,
+    paddingVertical: 15,
+    borderBottomWidth: 1,
+    borderBottomColor: "#333",
+  },
+  assignedTooMuchCancelButton: {
+    paddingHorizontal: 15,
+    paddingVertical: 8,
+  },
+  assignedTooMuchCancelButtonText: {
+    color: "#007AFF",
+    fontSize: 16,
+  },
+  assignedTooMuchTitle: {
+    fontSize: 18,
+    fontWeight: "bold",
+    color: "#fff",
+  },
+  assignedTooMuchWarningSection: {
+    backgroundColor: "#D32F2F",
+    marginHorizontal: 20,
+    marginVertical: 15,
+    borderRadius: 8,
+    padding: 20,
+    alignItems: "center",
+  },
+  assignedTooMuchWarningAmount: {
+    fontSize: 24,
+    fontWeight: "bold",
+    color: "#fff",
+    marginBottom: 5,
+  },
+  assignedTooMuchWarningText: {
+    fontSize: 16,
+    color: "#fff",
+    fontWeight: "600",
+    marginBottom: 5,
+  },
+  assignedTooMuchWarningSubtext: {
+    fontSize: 14,
+    color: "#fff",
+    opacity: 0.9,
+  },
+  assignedTooMuchScrollView: {
+    flex: 1,
+    paddingHorizontal: 20,
+  },
+  assignedTooMuchScrollViewContent: {
+    paddingBottom: 50,
+  },
+  assignedTooMuchGroupSection: {
+    marginBottom: 20,
+  },
+  assignedTooMuchGroupHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: "#333",
+    marginBottom: 10,
+  },
+  assignedTooMuchGroupName: {
+    fontSize: 18,
+    fontWeight: "bold",
+    color: "#fff",
+  },
+  assignedTooMuchGroupTotal: {
+    fontSize: 14,
+    color: "#888",
+  },
+  assignedTooMuchCategoryItem: {
+    backgroundColor: "#2a2a2a",
+    borderRadius: 8,
+    marginBottom: 8,
+    padding: 15,
+  },
+  assignedTooMuchCategoryInfo: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  assignedTooMuchCategoryLeft: {
+    flex: 1,
+  },
+  assignedTooMuchCategoryName: {
+    fontSize: 16,
+    color: "#fff",
+    fontWeight: "500",
+  },
+  assignedTooMuchCategoryAmountContainer: {
+    alignItems: "flex-end",
+  },
+  assignedTooMuchCategoryAmount: {
+    fontSize: 16,
+    color: "#fff",
+    fontWeight: "600",
+  },
+  assignedTooMuchCategoryItemSelected: {
+    backgroundColor: "#007AFF",
+  },
+  assignedTooMuchCategoryAmountSelected: {
+    color: "#fff",
+    fontWeight: "bold",
+  },
+  assignedTooMuchCategoryOperationText: {
+    fontSize: 14,
+    color: "#fff",
+    fontWeight: "600",
+    marginTop: 2,
+  },
+  subtractionNumberPadContainer: {
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: "#18191A",
+  },
+  // Main Plan Editing Styles
+  categoryItemSelected: {
+    backgroundColor: "#007AFF",
+  },
+  categoryAmountStack: {
+    alignItems: "flex-end",
+  },
+  categoryAssigned: {
+    fontSize: 14,
+    color: "#888",
+    fontWeight: "500",
+  },
+  categoryAmountSelected: {
+    color: "#fff",
+    fontWeight: "bold",
+  },
+  categoryOperationText: {
+    fontSize: 14,
+    color: "#007AFF",
+    fontWeight: "600",
+    marginTop: 2,
+  },
+  mainEditNumberPadContainer: {
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: "#18191A",
+    zIndex: 1000, // Ensure it's above other content
+  },
+  groupHeaderRight: {
+    flex: 1,
+    alignItems: "flex-end",
+  },
+  groupTotalsContainer: {
+    flexDirection: "row",
+    gap: 20,
+  },
+  groupTotalColumn: {
+    alignItems: "flex-end",
+    minWidth: 80,
+  },
+  groupTotalLabel: {
+    fontSize: 12,
+    color: "#888",
+    fontWeight: "500",
+    marginBottom: 2,
+  },
+  groupTotalAmount: {
+    fontSize: 14,
+    color: "#fff",
+    fontWeight: "600",
   },
 });
