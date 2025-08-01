@@ -118,6 +118,7 @@ export default function PlanScreen() {
   const [mainEditPadOperator, setMainEditPadOperator] = useState<
     "add" | "subtract" | undefined
   >(undefined);
+  const [hasStartedEditing, setHasStartedEditing] = useState(false);
 
   // Keyboard height state
   const [keyboardHeight, setKeyboardHeight] = useState(0);
@@ -170,6 +171,7 @@ export default function PlanScreen() {
     setMainEditPendingAmount("");
     setMainEditPadMemory(null);
     setMainEditPadOperator(undefined);
+    setHasStartedEditing(false);
 
     // Auto-scroll to bring selected category into view above number pad
     setTimeout(() => {
@@ -210,42 +212,54 @@ export default function PlanScreen() {
   };
 
   const handleMainEditPadBackspace = () => {
-    if (mainEditAmountFocused) {
-      if (mainEditPendingAmount) {
-        setMainEditPendingAmount((prev) => prev.slice(0, -1));
-      } else if (
-        selectedCategoryForMainEdit &&
-        selectedCategoryForMainEdit.budgeted > 0
-      ) {
-        // Backspace from existing budgeted amount
-        const currentBudgetedCents = Math.round(
-          selectedCategoryForMainEdit.budgeted * 100
-        );
-        const newBudgetedCents = Math.floor(currentBudgetedCents / 10);
-        const newBudgeted = newBudgetedCents / 100;
+    if (mainEditPendingAmount.length > 0) {
+      // Remove last digit
+      setMainEditPendingAmount(mainEditPendingAmount.slice(0, -1));
+      setHasStartedEditing(true);
+    } else if (
+      selectedCategoryForMainEdit &&
+      !mainEditPadOperator &&
+      mainEditAmountFocused &&
+      !hasStartedEditing
+    ) {
+      // On very first backspace, initialize with current budget and remove one digit
+      const currentAmount = selectedCategoryForMainEdit.budgeted;
+      const amountInCents = Math.floor(currentAmount * 100).toString();
 
-        // Update the category directly
-        const updatedCategories = categories.map((cat) =>
-          cat.id === selectedCategoryForMainEdit.id
-            ? { ...cat, budgeted: newBudgeted }
-            : cat
-        );
-        setCategories(updatedCategories);
+      if (amountInCents.length > 1) {
+        setMainEditPendingAmount(amountInCents.slice(0, -1));
+      } else {
+        setMainEditPendingAmount("0");
       }
+
+      setHasStartedEditing(true);
     }
+    // Else: already empty and already editing — do nothing
   };
 
   const handleMainEditPadAdd = () => {
     if (mainEditAmountFocused && selectedCategoryForMainEdit) {
+      const currentValue =
+        mainEditPendingAmount !== "" || hasStartedEditing
+          ? parseFloat(mainEditPendingAmount || "0") / 100
+          : selectedCategoryForMainEdit.budgeted;
+
       setMainEditPadOperator("add");
-      setMainEditPadMemory(selectedCategoryForMainEdit.budgeted);
+      setMainEditPadMemory(currentValue);
+      setMainEditPendingAmount(""); // Clear for the next operand
     }
   };
 
   const handleMainEditPadSubtract = () => {
     if (mainEditAmountFocused && selectedCategoryForMainEdit) {
+      const currentValue =
+        mainEditPendingAmount !== "" || hasStartedEditing
+          ? parseFloat(mainEditPendingAmount || "0") / 100
+          : selectedCategoryForMainEdit.budgeted;
+
       setMainEditPadOperator("subtract");
-      setMainEditPadMemory(selectedCategoryForMainEdit.budgeted);
+      setMainEditPadMemory(currentValue);
+      setMainEditPendingAmount("");
     }
   };
 
@@ -286,6 +300,9 @@ export default function PlanScreen() {
       } else if (mainEditPendingAmount) {
         // Direct amount entry
         finalAmount = parseFloat(mainEditPendingAmount) / 100;
+      } else if (hasStartedEditing) {
+        // User has started editing but no pending amount - save 0
+        finalAmount = 0;
       } else {
         // No change
         finalAmount = selectedCategoryForMainEdit.budgeted;
@@ -1429,28 +1446,9 @@ export default function PlanScreen() {
                           <View style={styles.groupTotalsContainer}>
                             <View style={styles.groupTotalColumn}>
                               <ThemedText style={styles.groupTotalLabel}>
-                                Assigned
-                              </ThemedText>
-                              <ThemedText style={styles.groupTotalAmount}>
-                                ${totalBudgeted.toFixed(2)}
-                              </ThemedText>
-                            </View>
-                            <View style={styles.groupTotalColumn}>
-                              <ThemedText style={styles.groupTotalLabel}>
                                 {group.id === "credit-card-payments"
                                   ? "Available for Payment"
                                   : "Available to Spend"}
-                              </ThemedText>
-                              <ThemedText style={styles.groupTotalAmount}>
-                                $
-                                {(
-                                  totalBudgeted -
-                                  groupCategories.reduce(
-                                    (sum, cat) =>
-                                      sum + calculateCategorySpending(cat.id),
-                                    0
-                                  )
-                                ).toFixed(2)}
                               </ThemedText>
                             </View>
                           </View>
@@ -1476,12 +1474,7 @@ export default function PlanScreen() {
                                   ref={(ref) => {
                                     categoryRefs.current[category.id] = ref;
                                   }}
-                                  style={[
-                                    styles.categoryItem,
-                                    selectedCategoryForMainEdit?.id ===
-                                      category.id &&
-                                      styles.categoryItemSelected,
-                                  ]}
+                                  style={styles.categoryItem}
                                   onPress={() =>
                                     selectCategoryForMainEdit(category)
                                   }
@@ -1512,11 +1505,6 @@ export default function PlanScreen() {
                                           style={styles.categoryAmountStack}
                                         >
                                           <ThemedText
-                                            style={styles.categoryAssigned}
-                                          >
-                                            ${category.budgeted.toFixed(2)}
-                                          </ThemedText>
-                                          <ThemedText
                                             style={[
                                               styles.categoryAmount,
                                               styles.categoryAmountSelected,
@@ -1527,30 +1515,29 @@ export default function PlanScreen() {
                                                   2
                                                 )}`
                                               : mainEditPendingAmount
-                                              ? `$${(
-                                                  parseFloat(
-                                                    mainEditPendingAmount
-                                                  ) / 100
-                                                ).toFixed(2)}`
-                                              : `$${available.toFixed(2)}`}
+                                              ? getFormattedPendingAmount(
+                                                  mainEditPendingAmount
+                                                )
+                                              : hasStartedEditing
+                                              ? "$0.00"
+                                              : `$${category.budgeted.toFixed(
+                                                  2
+                                                )}`}
                                           </ThemedText>
                                           {mainEditPadOperator && (
                                             <ThemedText
                                               style={
-                                                styles.categoryOperationText
+                                                styles.assignMoneyCategoryOperationText
                                               }
                                             >
                                               {mainEditPadOperator === "add"
                                                 ? "+"
-                                                : "-"}{" "}
-                                              $
+                                                : "-"}
                                               {mainEditPendingAmount
-                                                ? (
-                                                    parseFloat(
-                                                      mainEditPendingAmount
-                                                    ) / 100
-                                                  ).toFixed(2)
-                                                : "0.00"}
+                                                ? getFormattedPendingAmount(
+                                                    mainEditPendingAmount
+                                                  )
+                                                : "$0.00"}
                                             </ThemedText>
                                           )}
                                         </View>
@@ -3740,7 +3727,7 @@ const styles = StyleSheet.create({
     fontWeight: "500",
   },
   categoryAmountSelected: {
-    color: "#fff",
+    color: "#007AFF",
     fontWeight: "bold",
   },
   categoryOperationText: {
@@ -3767,13 +3754,14 @@ const styles = StyleSheet.create({
   },
   groupTotalColumn: {
     alignItems: "flex-end",
-    minWidth: 80,
+    minWidth: 120,
   },
   groupTotalLabel: {
     fontSize: 12,
     color: "#888",
     fontWeight: "500",
     marginBottom: 2,
+    textAlign: "right",
   },
   groupTotalAmount: {
     fontSize: 14,
